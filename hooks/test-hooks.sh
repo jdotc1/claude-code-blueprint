@@ -379,6 +379,53 @@ print('ok')" 2>/dev/null
 fi
 echo ""
 
+# 8. block-git-push decisions: exercise the real hook in a disposable repo.
+# No push is ever executed; the hook only inspects origin's configured URL.
+echo "--- Git Push Guard Decisions ---"
+if [ -z "$PYTHON" ] || ! command -v git >/dev/null 2>&1; then
+  skip "git push guard decisions need Python and Git"
+else
+  PUSH_REPO=$(mktemp -d)
+  if [ -z "$PUSH_REPO" ] || [ ! -d "$PUSH_REPO" ]; then
+    fail "git push guard disposable repo created"
+  elif ! git init -q "$PUSH_REPO" || \
+       ! git -C "$PUSH_REPO" remote add origin https://internal.example.com/team/app.git; then
+    fail "git push guard disposable repo initialized"
+  else
+    # Capture the hook's exit code, never running the candidate git command.
+    push_guard_code() {
+      (cd "$PUSH_REPO" && printf '%s' "$1" | bash "$HOOKS_DIR/block-git-push.sh" >/dev/null 2>&1)
+      echo "$?"
+    }
+    expect_push_code() {
+      if [ "$2" = "$3" ]; then
+        pass "$1"
+      else
+        fail "$1 (expected exit $2, got $3)"
+      fi
+    }
+
+    expect_push_code "block-git-push: protected remote denied" 2 \
+      "$(push_guard_code '{"tool_input":{"command":"git push origin main"}}')"
+    expect_push_code "block-git-push: protected remote denied with flags" 2 \
+      "$(push_guard_code '{"tool_input":{"command":"git push -u origin main"}}')"
+    expect_push_code "block-git-push: non-push command allowed" 0 \
+      "$(push_guard_code '{"tool_input":{"command":"git status"}}')"
+    expect_push_code "block-git-push: malformed JSON allowed" 0 \
+      "$(push_guard_code 'not json {{{')"
+
+    if git -C "$PUSH_REPO" remote set-url origin https://github.com/team/app.git; then
+      expect_push_code "block-git-push: public remote allowed" 0 \
+        "$(push_guard_code '{"tool_input":{"command":"git push origin main"}}')"
+    else
+      fail "block-git-push: change disposable remote"
+    fi
+  fi
+  # The only removed directory was created by mktemp in this section.
+  [ -n "$PUSH_REPO" ] && [ -d "$PUSH_REPO" ] && rm -r "$PUSH_REPO"
+fi
+echo ""
+
 # Summary
 echo "=== Results ==="
 echo "PASS: $PASS"
